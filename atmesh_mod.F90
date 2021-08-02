@@ -37,11 +37,12 @@ module atmesh_mod
     real(ESMF_KIND_R8), allocatable     :: LONS(:), LATS(:),TIMES(:)
     integer           , allocatable     :: TRI(:,:)
     integer           , allocatable     :: TRID(:,:)
-    real(ESMF_KIND_R8), allocatable     :: UWND (:,:), VWND(:,:), PRES (:,:)
+    real(ESMF_KIND_R8), allocatable     :: UWND (:,:), VWND(:,:), PRES (:,:), ICEC(:,:) !GML added ICEC 20210227
     !netcdf vars
     integer :: ncid, NOD_dimid, rec_dimid, ELM_dimid, NOE_dimid
     integer :: LON_varid, LAT_varid, rec_varid, tri_varid
-    integer :: UWND_varid, VWND_varid, PRES_varid
+    integer :: UWND_varid, VWND_varid, PRES_varid, ICEC_varid  !GML added ICEC_varid 20210227
+    integer :: atmice !GML
 
      
   
@@ -117,6 +118,8 @@ module atmesh_mod
       character (len = *), parameter :: UWND_NAME   = "uwnd"
       character (len = *), parameter :: VWND_NAME   = "vwnd"
       character (len = *), parameter :: PRES_NAME   = "P"
+!GML added ice concentration ICEC 20210227
+      character (len = *), parameter :: ICEC_NAME   = "ICEC"
       character (len = *), parameter :: TRI_NAME    = "tri"
 
       character (len = 140)          :: units
@@ -124,7 +127,9 @@ module atmesh_mod
 
 
       logical :: THERE
+      logical :: file_exists
       integer :: lat, lon,i, iret, rc, num
+
       
 
       FILE_NAME =  TRIM(atm_dir)//'/'//TRIM(atm_nam)
@@ -133,6 +138,23 @@ module atmesh_mod
       if ( .not. THERE)  stop 'ATMESH netcdf grdfile does not exist!'
 
       ncid = 0
+!++ GML
+      inquire(file="Atmice.inp", exist=file_exists)
+      if(file_exists)then
+      open(17517,file='Atmice.inp',status='old',action='read')
+      read(17517,*,err=99999) atmice
+      close(17517)
+    else
+      atmice=0
+      write(info,*) subname,' Did not find Atmice.inp'
+      call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+    endif
+99999 CONTINUE
+      write(info,*) subname,' atmice = ',atmice
+      !print *, info
+      call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+
+!++ 
       ! Open the file.
       call check(  nf90_open(trim(FILE_NAME), NF90_NOWRITE, ncid))
 
@@ -161,6 +183,9 @@ module atmesh_mod
       call check( nf90_inq_varid(ncid, UWND_NAME,    UWND_varid) )
       call check( nf90_inq_varid(ncid, VWND_NAME,    VWND_varid) )
       call check( nf90_inq_varid(ncid, PRES_NAME,    PRES_varid) )
+      if (atmice .eq. 1)then
+      call check( nf90_inq_varid(ncid, ICEC_NAME,    ICEC_varid) ) !GML added 20210727
+      endif
       call check( nf90_inq_varid(ncid, TRI_NAME,     TRI_varid) )
 
       !allocate vars
@@ -204,6 +229,7 @@ module atmesh_mod
       integer, parameter :: NDIMS = 2
       integer    :: start(NDIMS),count(NDIMS)
       logical    :: THERE
+      logical    :: file_exists
       real       :: delta_d_all (ntime) , delta_d_ref
       !integer   :: dimids(NDIMS)
 
@@ -213,6 +239,19 @@ module atmesh_mod
       integer    :: lat, lon,it, iret, rc
 
       rc = ESMF_SUCCESS
+
+!++ GML
+      inquire(file="Atmice.inp", exist=file_exists)
+      if(file_exists)then
+      open(17517,file='Atmice.inp',status='old',action='read')
+      read(17517,*,err=99999) atmice
+      close(17517)
+      else
+      atmice=0
+      write(info,*) subname,' Did not find Atmice.inp'
+      call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+      endif
+99999 CONTINUE
 
       !units = "days since 1990-01-01 00:00:00"
       call check(nf90_get_att(ncid,rec_varid,'units',units))
@@ -274,6 +313,7 @@ module atmesh_mod
       if(.not. allocated(UWND))   allocate (UWND (1:nnode,1))
       if(.not. allocated(VWND))   allocate (VWND (1:nnode,1))
       if(.not. allocated(PRES))   allocate (PRES (1:nnode,1))
+      if(.not. allocated(ICEC))   allocate (ICEC (1:nnode,1)) ! GML added 20210727
 
       start = (/ 1   , it/)
       count = (/nnode, 1 /)  !for some reason the order here is otherway around?!
@@ -283,7 +323,13 @@ module atmesh_mod
       call check( nf90_get_var(ncid,UWND_varid, UWND, start, count) )
       call check( nf90_get_var(ncid,VWND_varid, VWND, start, count) )
       call check( nf90_get_var(ncid,PRES_varid, PRES, start, count) )
-
+!++ GML
+      if (atmice .eq. 1)then
+      call check( nf90_get_var(ncid,ICEC_varid, ICEC, start, count) ) ! GML added 20210727
+      endif
+      write(info,*) subname,' atmice= ', atmice
+      call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+!++
       !print *,FILE_NAME , '   HARD CODED for NOWWWW>>>>>     Time index from atmesh file is > ', it, UWND(1:10,1)
       write(info,*) subname,' --- read ATMesh netcdf file  --- '
       !print *, info
