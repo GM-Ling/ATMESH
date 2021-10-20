@@ -26,12 +26,13 @@ module ATMESH
   use atmesh_mod, only: meshdata
   use atmesh_mod, only: create_parallel_esmf_mesh_from_meshdata
   !use atmesh_mod, only: atm_int,atm_num,atm_den
-  use atmesh_mod, only: UWND, VWND, PRES
+  use atmesh_mod, only: UWND, VWND, PRES, ICEC ! GML added ICEC 20210727
   use atmesh_mod, only: read_config
 
   !read from netcdf file
   use atmesh_mod, only: init_atmesh_nc, read_atmesh_nc 
   use atmesh_mod, only: construct_meshdata_from_netcdf
+  use atmesh_mod, only: atmice ! GML
   
   implicit none
   private
@@ -43,6 +44,7 @@ module ATMESH
       character(len=64) :: shortname
       character(len=64) :: unit
       logical           :: assoc    ! is the farrayPtr associated with internal data
+      logical           :: connected !++ GML
       real(ESMF_KIND_R8), dimension(:), pointer :: farrayPtr
   end type fld_list_type
 
@@ -56,8 +58,8 @@ module ATMESH
   integer,save         :: iwind_test = 0 
   character(len=2048):: info
   integer :: dbrc     ! temporary debug rc value
-
-
+!++ GML
+  logical :: pres_forcing
   !-----------------------------------------------------------------------------
   contains
   !-----------------------------------------------------------------------------
@@ -251,16 +253,34 @@ module ATMESH
 
    subroutine ATMESH_FieldsSetup
     integer                     :: rc
+    integer                     :: atmice !GML
     character(len=*),parameter  :: subname='(ATMESH:ATMESH_FieldsSetup)'
-
-
+    logical :: file_exists
     !--------- import fields to ATMESH  -------------
     
     !--------- export fields from ATMESH -------------
     call fld_list_add(num=fldsFrATM_num, fldlist=fldsFrATM, stdname="air_pressure_at_sea_level" , shortname= "pmsl" )
     call fld_list_add(num=fldsFrATM_num, fldlist=fldsFrATM, stdname="inst_zonal_wind_height10m" , shortname= "izwh10m" )
     call fld_list_add(num=fldsFrATM_num, fldlist=fldsFrATM, stdname="inst_merid_wind_height10m" , shortname= "imwh10m" )
-    !
+!++ GML added ice concentration 20210727
+    inquire(file="Atmice.inp", exist=file_exists)
+    if(file_exists)then
+    open(17517,file='Atmice.inp',status='old',action='read')
+    read(17517,*,err=99999) atmice
+    close(17517)
+!    atmice = 1 export ice; =0 not export ice
+    if (atmice .eq. 1)then
+    call fld_list_add(num=fldsFrATM_num, fldlist=fldsFrATM, stdname="sea_ice_concentration" , shortname= "seaice" )
+    endif
+    else
+      atmice=0
+      write(info,*) subname,' Did not find Atmice.inp'
+      call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+    endif
+99999 CONTINUE
+    write(info,*) subname,' atmice= ', atmice
+    call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc) 
+!++ 
     write(info,*) subname,' --- Passed--- '
     !print *,      subname,' --- Passed --- '
     call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)     
@@ -352,6 +372,31 @@ module ATMESH
     integer                      :: localPet, petCount
     character(len=*),parameter   :: subname='(ATMESH:RealizeFieldsProvidingGrid)'
 
+    !%  DW
+    ! exports
+    real(ESMF_KIND_R8), pointer   :: dataPtr_uwnd(:)
+    real(ESMF_KIND_R8), pointer   :: dataPtr_vwnd(:)
+    real(ESMF_KIND_R8), pointer   :: dataPtr_pres(:)
+!++ GML
+    real(ESMF_KIND_R8), pointer   :: dataPtr_icec(:)
+    type(ESMF_Time)               :: currTime
+    type(ESMF_TimeInterval)       :: timeStep
+    real(ESMF_KIND_R8), pointer   :: tmp(:)
+    integer :: YY, MM, DD, H, M, S
+!    logical :: pres_forcing = .false. ; 
+!    logical           :: connected
+!++
+
+    type(ESMF_StateItem_Flag)     :: itemType
+    type(ESMF_Mesh)               :: mesh
+    type(ESMF_Field)              :: lfield
+    character(len=128)            :: fldname,timeStr
+    integer:: i1,num
+
+    type(ESMF_Clock)     :: clock_tmp
+    type(ESMF_State)     :: importState_tmp, exportState_tmp
+    !% --> DW
+
     rc = ESMF_SUCCESS
 
     !print *,"ATMESH ..1.............................................. >> "
@@ -409,6 +454,23 @@ module ATMESH
         line=__LINE__, &
         file=__FILE__)) &
         return  ! bail out
+!++ GML
+!    importState_tmp=importState
+!    exportState_tmp=exportState
+    pres_forcing = .true. ; 
+    do num = 1,fldsFrATM_num
+       if (fldsFrATM(num)%shortname == 'pmsl') pres_forcing = pres_forcing .and. fldsFrATM(num)%connected
+    enddo
+!    call ModelAdvance(model, rc)
+!++
+!!C---- DW
+!    call NUOPC_ModelGet(model, modelClock=clock_tmp, importState=importState_tmp, &
+    call NUOPC_ModelGet(model, importState=importState_tmp, &
+      exportState=exportState_tmp, rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+     return  ! bail out
 
       !Init ATMesh
 !    ! query Component for the driverClock
@@ -426,8 +488,118 @@ module ATMESH
 !      return  ! bail out
 
 !    call read_atmesh_nc(startTime)
+!++ GML
+    call ESMF_ClockPrint(clock, options="currTime", &
+      preString="------>Advancing ATMESH from: ", rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
 
-    write(info,*) subname,' --- initialization phase 2 completed --- '
+    call ESMF_ClockGet(clock, currTime=currTime, timeStep=timeStep, rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    call ESMF_TimePrint(currTime + timeStep, &
+      preString="------------------ATMESH-------------> to: ", rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    call ESMF_TimeGet(currTime, yy=YY, mm=MM, dd=DD, h=H, m=M, s=S, rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, &
+        file=__FILE__)) &
+        return  ! bail out
+!
+!    !print *      , "ATMESH currTime = ", YY, "/", MM, "/", DD," ", H, ":", M, ":", S
+    write(info, *) "ATMESH currTime = ", YY, "/", MM, "/", DD," ", H, ":", M, ":", S
+    call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, line=__LINE__, file=__FILE__, rc=rc)
+    
+    call ESMF_TimeGet(currTime, timeStringISOFrac=timeStr , rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+        line=__LINE__, &
+        file=__FILE__)) &
+        return  ! bail out
+
+    call read_atmesh_nc(currTime)
+    !pack and send exported fields
+    allocate (tmp(mdataOutw%NumOwnedNd))
+!++
+!C------------- DW
+    ! >>>>> PACK and send UWND
+    call State_getFldPtr_(ST=exportState_tmp,fldname='izwh10m',fldptr=dataPtr_uwnd, &
+      rc=rc,dump=.false.,timeStr=timeStr)
+
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    !fill only owned nodes for tmp vector
+    do i1 = 1, mdataOutw%NumOwnedNd, 1
+!        tmp(i1) = UWND(mdataOutw%owned_to_present_nodes(i1),1)
+        dataPtr_uwnd(i1) = UWND(mdataOutw%owned_to_present_nodes(i1),1)
+    end do
+!    dataPtr_uwnd = tmp
+    !----------------------------------------
+    ! >>>>> PACK and send VWND
+    call State_getFldPtr_(ST=exportState_tmp,fldname='imwh10m',fldptr=dataPtr_vwnd, &
+      rc=rc,dump=.false.,timeStr=timeStr)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    !fill only owned nodes for tmp vector
+    do i1 = 1, mdataOutw%NumOwnedNd, 1
+!        tmp(i1) = VWND(mdataOutw%owned_to_present_nodes(i1),1)
+        dataPtr_vwnd(i1) = VWND(mdataOutw%owned_to_present_nodes(i1),1)
+    end do
+!    dataPtr_vwnd = tmp
+    !----------------------------------------
+    ! >>>>> PACK and send PRES
+    
+    if ( pres_forcing ) then
+    call State_getFldPtr_(ST=exportState_tmp,fldname='pmsl',fldptr=dataPtr_pres,&
+      rc=rc,dump=.false.,timeStr=timeStr)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    !fill only owned nodes for tmp vector
+    do i1 = 1, mdataOutw%NumOwnedNd, 1
+!        tmp(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
+        dataPtr_pres(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
+        if ( abs(dataPtr_pres(i1) ).gt. 1e11)  then
+          STOP '  dataPtr_pmsl > mask1 > in ATMesh ! '     
+        end if
+    end do
+!    dataPtr_pres = tmp
+    endif
+!C------------- DW
+!++ GML
+    if (atmice .eq. 1)then
+    call State_getFldPtr_(ST=exportState_tmp,fldname='seaice',fldptr=dataPtr_icec,&
+      rc=rc,dump=.false.,timeStr=timeStr)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    !fill only owned nodes for tmp vector
+    do i1 = 1, mdataOutw%NumOwnedNd, 1
+!        tmp(i1) = ICEC(mdataOutw%owned_to_present_nodes(i1),1) 
+    dataPtr_icec(i1) = ICEC(mdataOutw%owned_to_present_nodes(i1),1) 
+    end do
+!    dataPtr_icec = tmp
+    endif
+!++ GML
+    write(info,*) subname,' --- new initialization phase 2 completed --- '
     !print *,      subname,' --- initialization phase 2 completed --- '
     call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, line=__LINE__, file=__FILE__, rc=dbrc)
   end subroutine
@@ -483,7 +655,7 @@ module ATMESH
               rc=dbrc)
 
             !print *,      subname,' --- Connected --- '
-
+            field_defs(i)%connected = .true.
         else
             call ESMF_LogWrite(subname // tag // " Field "// field_defs(i)%stdname // " is not connected.", &
               ESMF_LOGMSG_INFO, &
@@ -500,6 +672,7 @@ module ATMESH
               return  ! bail out
             !print *,      subname,' --- Not-Connected --- '
             !print *,      subname," Field ", field_defs(i)%stdname ,' --- Not-Connected --- '
+            field_defs(i)%connected = .false.
         endif
     enddo
 
@@ -646,16 +819,24 @@ module ATMESH
     real(ESMF_KIND_R8), pointer   :: dataPtr_uwnd(:)
     real(ESMF_KIND_R8), pointer   :: dataPtr_vwnd(:)
     real(ESMF_KIND_R8), pointer   :: dataPtr_pres(:)
+    real(ESMF_KIND_R8), pointer   :: dataPtr_icec(:)
 
     type(ESMF_StateItem_Flag)     :: itemType
     type(ESMF_Mesh)               :: mesh
     type(ESMF_Field)              :: lfield
     character(len=128)            :: fldname,timeStr
     integer                       :: i1
+!    integer                       :: atmice !GML
     ! local variables for Get methods
     integer :: YY, MM, DD, H, M, S
 
     rc = ESMF_SUCCESS
+!++ GML
+!    logical :: pres_forcing = .false. ; 
+!    open(17517,file='Atmice.inp',status='old',action='read')
+!    read(17517,*,err=99999) atmice
+!    close(17517)
+!++ 
     ! query the Component for its clock, importState and exportState
     call NUOPC_ModelGet(model, modelClock=clock, importState=importState, &
       exportState=exportState, rc=rc)
@@ -699,7 +880,7 @@ module ATMESH
         file=__FILE__)) &
         return  ! bail out
 
-    print *      , "ATMESH currTime = ", YY, "/", MM, "/", DD," ", H, ":", M, ":", S
+    !print *      , "ATMESH currTime = ", YY, "/", MM, "/", DD," ", H, ":", M, ":", S
     write(info, *) "ATMESH currTime = ", YY, "/", MM, "/", DD," ", H, ":", M, ":", S
     call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, line=__LINE__, file=__FILE__, rc=rc)
     
@@ -717,7 +898,7 @@ module ATMESH
     !-----------------------------------------
     !   EXPORT
     !-----------------------------------------
-    !update uwnd, vwnd, pres from nearset time in atmesh netcdf file
+    !update uwnd, vwnd, pres, icec from nearset time in atmesh netcdf file
     !TODO: update file name!!!!
     call read_atmesh_nc(currTime)
 
@@ -725,28 +906,32 @@ module ATMESH
     allocate (tmp(mdataOutw%NumOwnedNd))
 
     ! >>>>> PACK and send UWND
-    !call State_GetFldPtr(ST=exportState,fldname='izwh10m',fldptr=dataPtr_uwnd,rc=rc)
-    call State_GetFldPtr_(ST=exportState,fldname='izwh10m',fldptr=dataPtr_uwnd, &
+    !call State_getFldPtr(ST=exportState,fldname='izwh10m',fldptr=dataPtr_uwnd,rc=rc)
+    call State_getFldPtr_(ST=exportState,fldname='izwh10m',fldptr=dataPtr_uwnd, &
       rc=rc,dump=.false.,timeStr=timeStr)
+
     if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
       line=__LINE__, &
       file=__FILE__)) &
       return  ! bail out
+
+      !print *, 'mdataOutw%NumOwnedNd > ',mdataOutw%NumOwnedNd, 'UWND > ', UWND(1:10,1)
 
     iwind_test = iwind_test + 1
     !fill only owned nodes for tmp vector
     do i1 = 1, mdataOutw%NumOwnedNd, 1
-        tmp(i1) = UWND(mdataOutw%owned_to_present_nodes(i1),1)
+        dataPtr_uwnd(i1) = UWND(mdataOutw%owned_to_present_nodes(i1),1)
+!        tmp(i1) = UWND(mdataOutw%owned_to_present_nodes(i1),1)
         !tmp(i1) = iwind_test  * i1 / 100000.0
         !tmp(i1) = -3.0
     end do
     !assign to field
-    dataPtr_uwnd = tmp
+!    dataPtr_uwnd = tmp
     !----------------------------------------
     ! >>>>> PACK and send VWND
-    call State_GetFldPtr_(ST=exportState,fldname='imwh10m',fldptr=dataPtr_vwnd, &
+    call State_getFldPtr_(ST=exportState,fldname='imwh10m',fldptr=dataPtr_vwnd, &
       rc=rc,dump=.false.,timeStr=timeStr)
-    !call State_GetFldPtr(ST=exportState,fldname='imwh10m',fldptr=dataPtr_vwnd,rc=rc)
+    !call State_getFldPtr (ST=exportState,fldname='imwh10m',fldptr=dataPtr_vwnd,rc=rc)
     if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
       line=__LINE__, &
       file=__FILE__)) &
@@ -754,14 +939,16 @@ module ATMESH
 
     !fill only owned nodes for tmp vector
     do i1 = 1, mdataOutw%NumOwnedNd, 1
-        tmp(i1) = VWND(mdataOutw%owned_to_present_nodes(i1),1)
+!        tmp(i1) = VWND(mdataOutw%owned_to_present_nodes(i1),1)
+        dataPtr_vwnd(i1) = VWND(mdataOutw%owned_to_present_nodes(i1),1)
         !tmp(i1) = 15.0
     end do
     !assign to field
-    dataPtr_vwnd = tmp
+!    dataPtr_vwnd = tmp
     !----------------------------------------
     ! >>>>> PACK and send PRES
-    call State_GetFldPtr_(ST=exportState,fldname='pmsl',fldptr=dataPtr_pres,&
+    if ( pres_forcing ) then ! ++ GML
+    call State_getFldPtr_(ST=exportState,fldname='pmsl',fldptr=dataPtr_pres,&
       rc=rc,dump=.false.,timeStr=timeStr)
     if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
       line=__LINE__, &
@@ -770,7 +957,8 @@ module ATMESH
 
     !fill only owned nodes for tmp vector
     do i1 = 1, mdataOutw%NumOwnedNd, 1
-        tmp(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
+        dataPtr_pres(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
+!        tmp(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
         
         if ( abs(tmp(i1) ).gt. 1e11)  then
           STOP '  dataPtr_pmsl > mask1 > in ATMesh ! '     
@@ -778,9 +966,38 @@ module ATMESH
         !tmp(i1) = 1e4
     end do
     !assign to field
-    dataPtr_pres = tmp
+!    dataPtr_pres = tmp
+    endif
     !----------------------------------------
+! GML added icec 20210630
+    !----------------------------------------
+    ! >>>>> PACK and send ICEC
 
+!    atmice = 1 export ice; =0 not export ice
+!    atmice = 1
+    write(info, *) subname, "atmice = ", atmice
+    call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+    write(info, *) subname, "pres_forcing = ", pres_forcing
+    call ESMF_LogWrite(info, ESMF_LOGMSG_INFO, rc=rc)
+    
+    if (atmice .eq. 1)then
+    call State_getFldPtr_(ST=exportState,fldname='seaice',fldptr=dataPtr_icec,&
+      rc=rc,dump=.false.,timeStr=timeStr)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, &
+      line=__LINE__, &
+      file=__FILE__)) &
+      return  ! bail out
+
+    !fill only owned nodes for tmp vector
+    do i1 = 1, mdataOutw%NumOwnedNd, 1
+!        tmp(i1) = ICEC(mdataOutw%owned_to_present_nodes(i1),1) 
+        dataPtr_icec(i1) = ICEC(mdataOutw%owned_to_present_nodes(i1),1) 
+    end do
+    !assign to field
+!    dataPtr_icec = tmp
+    endif
+!99999 CONTINUE
+    !----------------------------------------
 
     !! TODO:  not a right thing to do. we need to fix the grid object mask <<<<<<
     !where(dataPtr_uwnd.gt.3e4) dataPtr_uwnd = 0.0
