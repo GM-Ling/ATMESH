@@ -962,7 +962,7 @@ module ATMESH
         dataPtr_pres(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
 !        tmp(i1) = PRES(mdataOutw%owned_to_present_nodes(i1),1) 
         
-        if ( abs(tmp(i1) ).gt. 1e11)  then
+        if ( abs(dataPtr_pres(i1) ).gt. 1e11)  then
           STOP '  dataPtr_pmsl > mask1 > in ATMesh ! '     
         end if
         !tmp(i1) = 1e4
